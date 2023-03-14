@@ -2,7 +2,7 @@
 
 A LaunchDaemon for macOS to schedule regular backups using [Duplicacy](https://github.com/gilbertchen/duplicacy) featuring:
 
-- **Pinging [healthchecks.io](https://healthchecks.io/) on backup completion**
+- **Pinging [healthchecks.io](https://healthchecks.io/) on backup/prune/check completion**
 - **TCC setup validation and other sanity checks**
 - **Log rotation**
 - **No external dependencies, except `duplicacy` binary**
@@ -59,4 +59,4 @@ open -R /Library/Logs/com.duplicacy_macos_daemon.backup
 
 After configuring the backup process, ensuring your backups continue running is essential. [Healthchecks.io](https://healthchecks.io/) is an outside observer perfect for the job. 
 
-Specify your ping url using `--healthcheck https://hc-ping.com/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`, and the backup daemon will ping the url every time the backup job succeeds or something goes wrong.
+Specify your ping url using `--healthcheck-backup-url https://hc-ping.com/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`, and the backup daemon will ping the url every time the backup job succeeds or something goes wrong.

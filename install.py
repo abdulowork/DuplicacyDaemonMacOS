@@ -55,6 +55,14 @@ def install() -> None:
         help="Path to the duplicacy executable. Will be searched in PATH if unspecified",
     )
     parser.add_argument(
+        "--prune-keep",
+        help="-keep argument that will be passed to the prune command",
+        action="extend",
+        nargs="+",
+        type=str,
+        default=[],
+    )
+    parser.add_argument(
         "--backup-script-deployment-path",
         help="Path where the run_backup.py will be deployed",
         default=str(default_binary_deployment_path),
@@ -83,8 +91,16 @@ def install() -> None:
         action="store_true",
     )
     parser.add_argument(
-        "--healthcheck",
-        help="healthchecks.io URL to ping on job completion",
+        "--healthcheck-backup-url",
+        help="healthchecks.io URL to ping on backup completion",
+    )
+    parser.add_argument(
+        "--healthcheck-prune-url",
+        help="healthchecks.io URL to ping on prune completion",
+    )
+    parser.add_argument(
+        "--healthcheck-check-url",
+        help="healthchecks.io URL to ping on check completion",
     )
     args = parser.parse_args()
 
@@ -148,7 +164,10 @@ def install() -> None:
                         duplicacy_path=duplicacy_path,
                         repository_path=Path(args.repository_path),
                         logging_directory=logging_directory,
-                        healthcheck_url=args.healthcheck,
+                        healthcheck_backup_url=args.healthcheck_backup_url,
+                        healthcheck_prune_url=args.healthcheck_prune_url,
+                        healthcheck_check_url=args.healthcheck_check_url,
+                        prune_keep_arguments=args.prune_keep,
                         calendar_intervals=intervals,
                         skip_display_alert=args.skip_display_alert,
                         skip_check_for_full_disk_access=args.skip_check_for_full_disk_access,

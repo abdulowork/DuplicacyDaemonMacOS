@@ -1,36 +1,55 @@
 #!/usr/bin/python3
+from __future__ import annotations
 
 import gzip
 import logging
 import os
 import selectors
+import shlex
 import shutil
 import subprocess
+import typing
 from dataclasses import dataclass
 from logging import Logger
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from selectors import PollSelector
-from typing import Union
+from typing import Union, List, Callable, Optional
 from urllib.request import urlopen
+import itertools
 
-duplicacy_path = os.environ["DUPLICACY_PATH"]
 
-healthcheck_url = os.environ.get("HEALTHCHECK_URL")
+@dataclass
+class Env:
+    name: str
+
+    def get(self) -> Optional[str]:
+        return os.environ.get(self.name)
+
+    def get_unwrapped(self) -> str:
+        return os.environ[self.name]
+
+
+duplicacy_path_env = Env("DUPLICACY_PATH")
+prune_keep_arguments_env = Env("PRUNE_KEEP_ARGUMENTS")
+prune_keep_arguments = prune_keep_arguments_env.get()
+
+healthcheck_backup_url_env = Env("HEALTHCHECK_BACKUP_URL")
+healthcheck_prune_url_env = Env("HEALTHCHECK_PRUNE_URL")
+healthcheck_check_url_env = Env("HEALTHCHECK_CHECK_URL")
 healthcheck_connection_timeout = 60
 
-log_path = Path(os.environ["LOG_PATH"]).joinpath("duplicacy.log")
+log_path_env = Env("LOG_PATH")
 
-skip_display_alert = os.environ.get("SKIP_DISPLAY_ALERT") is not None
-skip_check_for_full_disk_access = (
-    os.environ.get("SKIP_CHECK_FOR_FULL_DISK_ACCESS") is not None
-)
+skip_display_alert_env = Env("SKIP_DISPLAY_ALERT")
+skip_check_for_full_disk_access_env = Env("SKIP_CHECK_FOR_FULL_DISK_ACCESS")
 
 
-def backup() -> None:
+def main() -> None:
     logger: Logger
+    log_path = Path(log_path_env.get_unwrapped()).joinpath("duplicacy.log")
     try:
-        logger = create_rotating_logger()
+        logger = create_rotating_logger(log_path=log_path)
     except Exception as exception:
         print("Couldn't create a logger")
         print(exception)
@@ -39,20 +58,120 @@ def backup() -> None:
         )
         exit(1)
 
-    check_for_full_disk_access(logger=logger)
+    commands = Commands(
+        logger=logger,
+        log_path=log_path,
+    )
+    commands.check_for_full_disk_access()
+    commands.run_backup()
+    commands.run_prune()
+    commands.run_check()
 
-    try:
-        show_alert("Beginning backup", timeout=3)
+    return None
 
-        backup_process = subprocess.Popen(
-            args=[duplicacy_path, "backup", "-stats"],
+
+@dataclass
+class Commands:
+    logger: Logger
+    log_path: Path
+
+    def check_for_full_disk_access(self) -> None:
+        if skip_check_for_full_disk_access_env.get() is not None:
+            self.logger.info("Skipping full disk access check")
+            return
+
+        try:
+            os.listdir("/Library/Application Support/com.apple.TCC")
+        except PermissionError as exception:
+            self.logger.error(f"Full disk access permission error: {exception}")
+            show_alert(
+                f"Backup process probably doesn't have Full Disk Access. Grant Full Disk Access to backup_exec or disable this check with --skip-check-for-full-disk-access",
+            )
+            exit(1)
+        except Exception as exception:
+            self.logger.error(f"Check for full disk access failed: {exception}")
+            show_alert(
+                f"Check for full disk access failed. Aborting backup. See logs in {str(self.log_path.parent)}",
+            )
+            exit(1)
+
+    def run_backup(self) -> None:
+        self.__run_subprocess_safely(
+            args=[duplicacy_path_env.get_unwrapped(), "backup", "-stats"],
+            on_start=lambda: show_alert("Beginning backup", timeout=3),
+            subprocess_events_handler=self.__subprocess_event_handler(
+                action="Backup",
+                url_to_ping=healthcheck_backup_url_env.get(),
+            ),
+        )
+
+    def run_prune(self) -> None:
+        if prune_keep_arguments is None:
+            self.logger.info("Skipping prune")
+            return
+
+        self.__run_subprocess_safely(
+            args=[duplicacy_path_env.get_unwrapped(), "prune"]
+            + flatten(
+                [["-keep", interval] for interval in shlex.split(prune_keep_arguments)]
+            ),
+            on_start=lambda: None,
+            subprocess_events_handler=self.__subprocess_event_handler(
+                action="Prune",
+                url_to_ping=healthcheck_prune_url_env.get(),
+            ),
+        )
+
+    def run_check(self) -> None:
+        self.__run_subprocess_safely(
+            args=[duplicacy_path_env.get_unwrapped(), "check"],
+            on_start=lambda: None,
+            subprocess_events_handler=self.__subprocess_event_handler(
+                action="Check",
+                url_to_ping=healthcheck_check_url_env.get(),
+            ),
+        )
+
+    def __subprocess_event_handler(
+        self,
+        action: str,
+        url_to_ping: Optional[str],
+    ) -> SubprocessEventsHandler:
+        return SubprocessEventsHandler(
+            action=action,
+            url_to_ping=url_to_ping,
+            log_path=self.log_path,
+            logger=self.logger,
+        )
+
+    def __run_subprocess_safely(
+        self,
+        args: List[str],
+        on_start: Callable[[], None],
+        subprocess_events_handler: SubprocessEventsHandler,
+    ) -> None:
+        try:
+            on_start()
+            subprocess_exit_code = self.__run_subprocess(args=args)
+            if subprocess_exit_code != 0:
+                subprocess_events_handler.on_non_zero_exit_code(subprocess_exit_code)
+            else:
+                subprocess_events_handler.on_zero_exit_code()
+        except Exception as exception:
+            subprocess_events_handler.on_generic_failure(exception)
+
+    def __run_subprocess(self, args: List[str]) -> int:
+        self.logger.info(f"Running subprocess: {args}")
+
+        process = subprocess.Popen(
+            args=args,
             stderr=subprocess.PIPE,
             stdout=subprocess.PIPE,
         )
 
         selector = PollSelector()
-        selector.register(backup_process.stdout, selectors.EVENT_READ)  # type: ignore
-        selector.register(backup_process.stderr, selectors.EVENT_READ)  # type: ignore
+        selector.register(process.stdout, selectors.EVENT_READ)  # type: ignore
+        selector.register(process.stderr, selectors.EVENT_READ)  # type: ignore
 
         while len(selector.get_map()) != 0:
             ready = selector.select()
@@ -66,41 +185,67 @@ def backup() -> None:
                 try:
                     log = bytes_line.decode()
                 except Exception as e:
-                    logger.error(e)
+                    self.logger.error(e)
                     log = bytes_line
 
-                if key.fileobj == backup_process.stdout:
-                    logger.info(log)
-                if key.fileobj == backup_process.stderr:
-                    logger.error(log)
+                if key.fileobj == process.stdout:
+                    self.logger.info(log)
+                if key.fileobj == process.stderr:
+                    self.logger.error(log)
 
-        backup_process.wait()
+        process.wait()
 
-        if backup_process.returncode != 0:
-            backup_failed_message = (
-                f"Backup failed with exit code: {backup_process.returncode}"
-            )
-            logger.error(backup_failed_message)
-            report_to_healthcheck(
-                result=JobFailureWithCode(exit_code=backup_process.returncode),
-                logger=logger,
-            )
-            show_alert(f"{backup_failed_message}. See logs in {str(log_path)}")
-        else:
-            message = "Backup was successful"
-            logger.info(message)
-            report_to_healthcheck(
-                result=JobSuccess(),
-                logger=logger,
-            )
-            show_alert(message)
-    except Exception as exception:
-        logger.error(f"Error while backing up: {exception}")
-        report_to_healthcheck(
+        return process.returncode
+
+
+@dataclass
+class SubprocessEventsHandler:
+    action: str
+    url_to_ping: Optional[str]
+    log_path: Path
+    logger: Logger
+
+    def on_generic_failure(self, exception: Exception) -> None:
+        self.logger.error(f"Error in {self.action}: {exception}")
+        self.__report_to_healthcheck(
             result=JobGenericFailure(),
-            logger=logger,
         )
-        show_alert(f"Something went wrong during backup. See logs in {str(log_path)}")
+        show_alert(
+            f"Something went wrong during {self.action}. See logs in {str(self.log_path)}"
+        )
+
+    def on_non_zero_exit_code(self, exit_code: int) -> None:
+        message = f"{self.action} failed with exit code: {exit_code}"
+        self.logger.error(message)
+        self.__report_to_healthcheck(
+            result=JobFailureWithCode(exit_code=exit_code),
+        )
+        show_alert(f"{message}. See logs in {str(self.log_path)}")
+
+    def on_zero_exit_code(self) -> None:
+        message = f"{self.action} was successful"
+        self.logger.info(message)
+        self.__report_to_healthcheck(
+            result=JobSuccess(),
+        )
+        show_alert(message)
+
+    def __report_to_healthcheck(
+        self,
+        result: Union[JobSuccess, JobGenericFailure, JobFailureWithCode],
+    ) -> None:
+        if self.url_to_ping is None:
+            self.logger.info(f"Skipping healthcheck ping for {self.action}")
+            return
+
+        if isinstance(result, JobSuccess):
+            pass
+        elif isinstance(result, JobGenericFailure):
+            self.url_to_ping += "/fail"
+        elif isinstance(result, JobFailureWithCode):
+            self.url_to_ping += f"/{result.exit_code}"
+
+        urlopen(self.url_to_ping, timeout=healthcheck_connection_timeout)
 
 
 @dataclass
@@ -118,52 +263,11 @@ class JobFailureWithCode:
     exit_code: int
 
 
-def check_for_full_disk_access(
-    logger: Logger,
-) -> None:
-    if skip_check_for_full_disk_access:
-        logger.info("Skipping full disk access check")
-        return
-
-    try:
-        os.listdir("/Library/Application Support/com.apple.TCC")
-    except PermissionError as exception:
-        logger.error(f"Full disk access permission error: {exception}")
-        show_alert(
-            f"Backup process probably doesn't have Full Disk Access. Grant Full Disk Access to backup_exec or disable this check with --skip-check-for-full-disk-access",
-        )
-        exit(1)
-    except Exception as exception:
-        logger.error(f"Check for full disk access failed: {exception}")
-        show_alert(
-            f"Check for full disk access failed. Aborting backup. See logs in {str(log_path.parent)}",
-        )
-        exit(1)
-
-
-def report_to_healthcheck(
-    result: Union[JobSuccess, JobGenericFailure, JobFailureWithCode], logger: Logger
-) -> None:
-    if healthcheck_url is None:
-        logger.info("URL for healthcheck is not specified, skipping")
-        return
-
-    url_to_ping = healthcheck_url
-    if isinstance(result, JobSuccess):
-        pass
-    elif isinstance(result, JobGenericFailure):
-        url_to_ping += "/fail"
-    elif isinstance(result, JobFailureWithCode):
-        url_to_ping += f"/{result.exit_code}"
-
-    urlopen(url_to_ping, timeout=healthcheck_connection_timeout)
-
-
 def show_alert(
     message: str,
     timeout: int = 60,
 ) -> None:
-    if skip_display_alert:
+    if skip_display_alert_env.get() is not None:
         return
     try:
         subprocess.run(
@@ -181,18 +285,7 @@ def show_alert(
         print(f"Alert error: {e}")
 
 
-def namer(name: str) -> str:
-    return name + "log.gz"
-
-
-def rotator(source: str, dest: str) -> None:
-    with open(source, "rb") as f_in:
-        with gzip.open(dest, "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
-    os.remove(source)
-
-
-def create_rotating_logger() -> Logger:
+def create_rotating_logger(log_path: Path) -> Logger:
     logger = logging.getLogger()
     rotating_file_handler = TimedRotatingFileHandler(
         filename=log_path,
@@ -206,12 +299,30 @@ def create_rotating_logger() -> Logger:
             datefmt="%d/%b/%Y %H:%M:%S",
         )
     )
+
+    def namer(name: str) -> str:
+        return name + "log.gz"
+
     rotating_file_handler.namer = namer
+
+    def rotator(source: str, dest: str) -> None:
+        with open(source, "rb") as f_in:
+            with gzip.open(dest, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+        os.remove(source)
+
     rotating_file_handler.rotator = rotator
     logger.addHandler(rotating_file_handler)
     logger.setLevel(logging.DEBUG)
     return logger
 
 
+T = typing.TypeVar("T")
+
+
+def flatten(list_of_lists: List[List[T]]) -> List[T]:
+    return list(itertools.chain.from_iterable(list_of_lists))
+
+
 if __name__ == "__main__":
-    backup()
+    main()

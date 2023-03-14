@@ -1,50 +1,63 @@
 import plistlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
 
 from lib.start_calendar_interval import StartCalendarInterval
+import run_backup
 
 
+@dataclass
 class LaunchdPlistFactory:
-    def __init__(
-        self,
-        service_identifier: str,
-        backup_script_path: Path,
-        backup_binary_deployment_path: Path,
-        duplicacy_path: Path,
-        repository_path: Path,
-        logging_directory: Path,
-        healthcheck_url: Optional[str],
-        calendar_intervals: List[StartCalendarInterval],
-        skip_check_for_full_disk_access: bool,
-        skip_display_alert: bool,
-    ):
-        self.__service_identifier = service_identifier
-        self.__backup_script_path = backup_script_path
-        self.__backup_binary_deployment_path = backup_binary_deployment_path
-        self.__duplicacy_path = duplicacy_path
-        self.__repository_path = repository_path
-        self.__logging_directory = logging_directory
-        self.__healthcheck_url = healthcheck_url
-        self.__calendar_intervals = calendar_intervals
-        self.__skip_check_for_full_disk_access = skip_check_for_full_disk_access
-        self.__skip_display_alert = skip_display_alert
+    service_identifier: str
+    backup_script_path: Path
+    backup_binary_deployment_path: Path
+    duplicacy_path: Path
+    repository_path: Path
+    logging_directory: Path
+    healthcheck_backup_url: Optional[str]
+    healthcheck_prune_url: Optional[str]
+    healthcheck_check_url: Optional[str]
+    prune_keep_arguments: List[str]
+    calendar_intervals: List[StartCalendarInterval]
+    skip_check_for_full_disk_access: bool
+    skip_display_alert: bool
 
     def plist_string(self) -> str:
         environment_variables = dict()
-        if self.__healthcheck_url is not None:
-            environment_variables["HEALTHCHECK_URL"] = self.__healthcheck_url
-        if self.__skip_check_for_full_disk_access:
-            environment_variables["SKIP_CHECK_FOR_FULL_DISK_ACCESS"] = "1"
-        if self.__skip_display_alert:
-            environment_variables["SKIP_DISPLAY_ALERT"] = "1"
+        if self.healthcheck_backup_url is not None:
+            environment_variables[
+                run_backup.healthcheck_backup_url_env.name
+            ] = self.healthcheck_backup_url
+        if self.healthcheck_prune_url is not None:
+            environment_variables[
+                run_backup.healthcheck_prune_url_env.name
+            ] = self.healthcheck_prune_url
+        if self.healthcheck_check_url is not None:
+            environment_variables[
+                run_backup.healthcheck_check_url_env.name
+            ] = self.healthcheck_check_url
+        if len(self.prune_keep_arguments) > 0:
+            environment_variables[run_backup.prune_keep_arguments_env.name] = " ".join(
+                self.prune_keep_arguments
+            )
+        if self.skip_check_for_full_disk_access:
+            environment_variables[
+                run_backup.skip_check_for_full_disk_access_env.name
+            ] = "1"
+        if self.skip_display_alert:
+            environment_variables[run_backup.skip_display_alert_env.name] = "1"
 
-        environment_variables["BACKUP_SCRIPT_PATH"] = str(self.__backup_script_path)
-        environment_variables["LOG_PATH"] = str(self.__logging_directory)
-        environment_variables["DUPLICACY_PATH"] = str(self.__duplicacy_path)
+        environment_variables["BACKUP_SCRIPT_PATH"] = str(self.backup_script_path)
+        environment_variables[run_backup.log_path_env.name] = str(
+            self.logging_directory
+        )
+        environment_variables[run_backup.duplicacy_path_env.name] = str(
+            self.duplicacy_path
+        )
 
         intervals = list()
-        for interval in self.__calendar_intervals:
+        for interval in self.calendar_intervals:
             output = dict()
             if interval.minute is not None:
                 output["Minute"] = interval.minute
@@ -59,16 +72,16 @@ class LaunchdPlistFactory:
             intervals.append(output)
 
         launchd_plist = {
-            "Label": self.__service_identifier,
-            "Program": str(self.__backup_binary_deployment_path),
+            "Label": self.service_identifier,
+            "Program": str(self.backup_binary_deployment_path),
             "EnvironmentVariables": environment_variables,
-            "WorkingDirectory": str(self.__repository_path),
+            "WorkingDirectory": str(self.repository_path),
             "StartCalendarInterval": intervals,
             "StandardOutPath": str(
-                self.__logging_directory.joinpath("backup.stdout.log")
+                self.logging_directory.joinpath("backup.stdout.log")
             ),
             "StandardErrorPath": str(
-                self.__logging_directory.joinpath("backup.stderr.log")
+                self.logging_directory.joinpath("backup.stderr.log")
             ),
         }
 
