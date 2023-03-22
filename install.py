@@ -74,11 +74,11 @@ def install() -> None:
     )
     parser.add_argument(
         "--start-calendar-interval",
-        help="Schedule for the backup to run in the CSV format: '<Minute>,<Hour>,<Day>,<Weekday>,<Month>'. For example use '--start-calendar-interval ,1,,,' to run backup every day at 1:00. See StartCalendarInterval in 'man launchd.plist' for details",
+        help="Schedule for the backup to run in the CSV format: '<Minute>,<Hour>,<Day>,<Weekday>,<Month>'. For example use '--start-calendar-interval 0,1,,,' to run backup every day at 1:00. See StartCalendarInterval in 'man launchd.plist' for details",
         action="extend",
         nargs="+",
         type=str,
-        default=[",1,,,"],
+        default=["0,1,,,"],
     )
     parser.add_argument(
         "--skip-display-alert",
